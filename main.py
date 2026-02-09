@@ -159,12 +159,16 @@ def reset(step, reset_all):
                 output_dir / "step2_tech_specs_partial.parquet",
                 state_dir / "step2_tech_specs_progress.json",
             ]
+            for chunk in output_dir.glob("step2_tech_specs_chunk_*.parquet"):
+                files.append(chunk)
         elif step_num == 3:
             files = [
                 output_dir / "step3_permit_license.parquet",
                 output_dir / "step3_permit_license_partial.parquet",
                 state_dir / "step3_permit_license_progress.json",
             ]
+            for chunk in output_dir.glob("step3_permit_license_chunk_*.parquet"):
+                files.append(chunk)
         elif step_num == 4:
             files = [
                 output_dir / "final_dataset.parquet",

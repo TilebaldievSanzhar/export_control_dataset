@@ -104,8 +104,12 @@ class Step2TechSpecs:
 
         self._state_manager.set_total(len(saf_numbers))
 
+        # Clean up old chunks on fresh start
+        if not (resume or incremental):
+            self._cleanup_partial_results()
+
         # Process SAF numbers
-        results = self._load_partial_results() if resume else []
+        results = []
 
         with ProgressTracker(
             "Processing specs",
@@ -156,13 +160,19 @@ class Step2TechSpecs:
                     self._state_manager.update_batch(i + 1)
                     self._state_manager.save()
                     self._save_partial_results(results)
+                    results.clear()
                     self._logger.info(
                         f"Checkpoint: {len(self._state_manager.get_processed())}/{len(saf_numbers)}"
                     )
 
         # Final save
         self._state_manager.save()
-        df_new = pd.DataFrame(results)
+        if results:
+            self._save_partial_results(results)
+            results.clear()
+
+        df_new = self._load_all_partial_results()
+        self._cleanup_partial_results()
         output_path = self._output_dir / "step2_tech_specs.parquet"
 
         # In incremental mode, merge with existing results
@@ -186,16 +196,28 @@ class Step2TechSpecs:
         return df
 
     def _save_partial_results(self, results: list[dict]) -> None:
-        """Save partial results to file."""
-        if results:
-            df = pd.DataFrame(results)
-            partial_path = self._output_dir / "step2_tech_specs_partial.parquet"
-            df.to_parquet(partial_path, index=False)
+        """Save a batch of results as a numbered chunk file."""
+        if not results:
+            return
+        df = pd.DataFrame(results)
+        chunk_num = 0
+        while (self._output_dir / f"step2_tech_specs_chunk_{chunk_num}.parquet").exists():
+            chunk_num += 1
+        chunk_path = self._output_dir / f"step2_tech_specs_chunk_{chunk_num}.parquet"
+        df.to_parquet(chunk_path, index=False)
 
-    def _load_partial_results(self) -> list[dict]:
-        """Load partial results from file."""
+    def _load_all_partial_results(self) -> pd.DataFrame:
+        """Load and combine all chunk files into a single DataFrame."""
+        chunk_files = sorted(self._output_dir.glob("step2_tech_specs_chunk_*.parquet"))
+        if not chunk_files:
+            return pd.DataFrame()
+        chunks = [pd.read_parquet(f) for f in chunk_files]
+        return pd.concat(chunks, ignore_index=True)
+
+    def _cleanup_partial_results(self) -> None:
+        """Remove all chunk files and old-style partial file."""
+        for f in self._output_dir.glob("step2_tech_specs_chunk_*.parquet"):
+            f.unlink()
         partial_path = self._output_dir / "step2_tech_specs_partial.parquet"
         if partial_path.exists():
-            df = pd.read_parquet(partial_path)
-            return df.to_dict("records")
-        return []
+            partial_path.unlink()
