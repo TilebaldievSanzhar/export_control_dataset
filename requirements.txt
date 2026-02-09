@@ -1,0 +1,27 @@
+# Database
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.0
+
+# MinIO
+minio>=7.2.0
+
+# PDF processing
+PyPDF2>=3.0.0
+pdfplumber>=0.10.0
+
+# Data processing
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# HTTP
+httpx>=0.25.0
+
+# CLI
+click>=8.1.0
+rich>=13.0.0
+
+# Utils
+python-dotenv>=1.0.0
+
+# Async
+aiofiles>=23.0.0
