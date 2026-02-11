@@ -9,6 +9,7 @@
 - [Конфигурация](#конфигурация)
 - [Использование](#использование)
   - [Инкрементальная обработка новых файлов](#инкрементальная-обработка-новых-файлов)
+- [Docker](#docker)
 - [Этапы пайплайна](#этапы-пайплайна)
 - [Структура проекта](#структура-проекта)
 - [Выходные данные](#выходные-данные)
@@ -17,6 +18,7 @@
   - [Как работает --incremental](#как-работает---incremental)
   - [Как работает --resume](#как-работает---resume)
   - [Команда refresh-mapping](#команда-refresh-mapping)
+- [Диагностика](#диагностика)
 - [Расширение паттернов](#расширение-паттернов)
 
 ## Требования
@@ -193,6 +195,62 @@ python main.py reset --all
 python main.py run --step 4 --output-format csv
 ```
 
+## Docker
+
+### Сборка образа
+
+```bash
+cd export_control_dataset
+docker build -t export-control-pipeline .
+```
+
+### Запуск всего пайплайна
+
+```bash
+docker run --rm \
+  --memory=4g \
+  --cpus=2 \
+  --env-file .env \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/state:/app/state \
+  -v $(pwd)/logs:/app/logs \
+  export-control-pipeline
+```
+
+### Запуск отдельного шага
+
+```bash
+docker run --rm \
+  --memory=4g \
+  --cpus=2 \
+  --env-file .env \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/state:/app/state \
+  -v $(pwd)/logs:/app/logs \
+  export-control-pipeline run --step 2 --resume
+```
+
+### Проверка статуса
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/state:/app/state \
+  export-control-pipeline status
+```
+
+### Ограничения ресурсов
+
+| Параметр | Описание | Рекомендация |
+|----------|----------|-------------|
+| `--memory` | Лимит оперативной памяти | `4g` для стандартных объёмов |
+| `--cpus` | Лимит CPU | `2` чтобы не занять все ядра |
+
+Volumes (`-v`) монтируют `output/`, `state/` и `logs/` с хост-машины, чтобы результаты и прогресс сохранялись между запусками. `.env` передаётся через `--env-file` и не копируется в образ.
+
+**Важно:** В `.env` для Docker адреса сервисов (`DB_HOST`, `MINIO_ENDPOINT`) должны быть доступны из контейнера. `localhost` не подойдёт — используйте реальные IP/хосты или `host.docker.internal`.
+
 ## Этапы пайплайна
 
 ### Этап 1: Формирование базового датасета
@@ -202,6 +260,21 @@ python main.py run --step 4 --output-format csv
 **Выходные данные:** `output/step1_base_dataset.parquet`
 
 Извлекает данные из таблиц `saf` и `saf_product_index`, создаёт маппинг документов из MinIO.
+
+**SQL-запрос:**
+
+```sql
+SELECT
+    p.saf_number,
+    p.hs_code_10 AS hs_code,
+    p.product_description,
+    s.lecense_need AS license_need_db
+FROM saf_product_index p
+LEFT JOIN saf s ON p.saf_number = s.saf_number
+ORDER BY p.saf_number, p.id
+```
+
+Используется `LEFT JOIN`, чтобы сохранить все записи из `saf_product_index`, даже если для них нет записи в таблице `saf`. В этом случае `license_need_db` будет `NULL`.
 
 ### Этап 2: OCR технических описаний
 
@@ -214,7 +287,8 @@ python main.py run --step 4 --output-format csv
 **Особенности:**
 - До 5 параллельных запросов к OCR
 - Автоматический retry при ошибках сети
-- Сохранение прогресса каждые 100 записей
+- Сохранение прогресса каждые 100 записей (BATCH_SIZE)
+- Чанковая запись результатов на диск для экономии памяти (см. [Управление памятью](#управление-памятью))
 
 ### Этап 3: Извлечение текста из permit/license
 
@@ -224,13 +298,16 @@ python main.py run --step 4 --output-format csv
 
 Извлекает текст из машиночитаемых PDF без OCR (быстрее).
 
+**Особенности:**
+- Чанковая запись результатов на диск для экономии памяти (аналогично этапу 2)
+
 ### Этап 4: Классификация
 
 **Входные данные:** Результаты этапов 1-3
 
 **Выходные данные:** `output/final_dataset.parquet`
 
-Объединяет все данные и определяет `license_need` на основе паттернов.
+Объединяет все данные и определяет `license_need` на основе паттернов. Этапы 1-3 объединяются через `LEFT JOIN` по `saf_number`, поэтому все записи из базового датасета сохраняются, а `tech_description`, `permit_text`, `license_text` могут быть `NULL`.
 
 ## Структура проекта
 
@@ -259,6 +336,9 @@ export_control_dataset/
 ├── output/                  # Выходные датасеты
 ├── logs/                    # Логи
 ├── main.py                  # CLI интерфейс
+├── diagnostic.py            # Диагностика покрытия данных
+├── Dockerfile               # Docker-образ
+├── .dockerignore
 ├── requirements.txt
 └── .env.example
 ```
@@ -272,11 +352,11 @@ export_control_dataset/
 | `saf_number` | string | Номер заявки |
 | `hs_code` | string | Код ТН ВЭД (10 знаков) |
 | `product_description` | string | Описание товара из БД |
-| `tech_description` | string | Текст из тех. описания (OCR) |
+| `tech_description` | string \| null | Текст из тех. описания (OCR) |
 | `permit_text` | string \| null | Текст из документов permit/ |
 | `license_text` | string \| null | Текст из документов license/ |
 | `license_need` | boolean \| null | Результат классификации |
-| `license_need_db` | boolean | Значение из БД (для верификации) |
+| `license_need_db` | boolean \| null | Значение из БД (NULL если нет записи в таблице `saf`) |
 
 ### Чтение данных
 
@@ -289,6 +369,18 @@ df = pd.read_parquet("output/final_dataset.parquet")
 # CSV (если экспортировали)
 df = pd.read_csv("output/final_dataset.csv")
 ```
+
+## Управление памятью
+
+Этапы 2 и 3 используют **чанковую запись** для экономии оперативной памяти:
+
+- Каждые `BATCH_SIZE` записей (по умолчанию 100) результаты сбрасываются на диск как отдельный chunk-файл (`output/step2_tech_specs_chunk_N.parquet`)
+- Список результатов в памяти очищается после каждого checkpoint
+- В конце этапа все chunk-файлы собираются в финальный parquet, chunk-и удаляются
+
+**В памяти в любой момент находится не более ~100 записей**, независимо от общего объёма данных. Это позволяет обрабатывать десятки тысяч SAF-номеров без риска OOM.
+
+При resume chunk-файлы с предыдущего запуска сохраняются на диске, новые результаты дописываются в новые chunk-и.
 
 ## Возобновление работы
 
@@ -337,6 +429,22 @@ python main.py refresh-mapping
 - В MinIO добавились новые файлы
 - База данных не изменилась (нет новых SAF номеров)
 - Не хотите перезапускать step 1 полностью
+
+## Диагностика
+
+Скрипт `diagnostic.py` анализирует покрытие данных между PostgreSQL и MinIO:
+
+```bash
+python diagnostic.py
+```
+
+Показывает:
+- Количество SAF-номеров в каждой таблице БД
+- Количество директорий в MinIO (`specs/`, `permit/`, `license/`)
+- Пересечение БД и MinIO (сколько SAF-номеров реально обрабатываются)
+- Проверка формата SAF-номеров (несовпадение регистра, пробелов и т.д.)
+- Анализ "потерянных" SAF-номеров (есть в MinIO, но нет в БД и наоборот)
+- Статистика по выходным файлам и ошибкам OCR
 
 ## Расширение паттернов
 
@@ -407,9 +515,14 @@ OCR_TIMEOUT=600
 
 ### Нехватка памяти
 
-Уменьшите размер батча:
+Уменьшите размер батча (меньше записей в памяти между checkpoint-ами):
 ```env
 BATCH_SIZE=50
+```
+
+При запуске в Docker ограничьте ресурсы:
+```bash
+docker run --memory=4g --cpus=2 ...
 ```
 
 ### Слишком много ошибок OCR
