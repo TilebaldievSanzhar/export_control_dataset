@@ -35,7 +35,7 @@ class MinIOSettings:
 @dataclass
 class OCRSettings:
     """OCR API settings."""
-    api_url: str = field(default_factory=lambda: os.getenv("OCR_API_URL", "https://ocr.trade.kg/documents/api/v1"))
+    api_url: str = field(default_factory=lambda: os.getenv("OCR_API_URL", "http://192.168.250.44:8088"))
     secret_key: str = field(default_factory=lambda: os.getenv("OCR_SECRET_KEY", ""))
     poll_interval: int = field(default_factory=lambda: int(os.getenv("OCR_POLL_INTERVAL", "5")))
     max_concurrent: int = field(default_factory=lambda: int(os.getenv("OCR_MAX_CONCURRENT", "5")))
